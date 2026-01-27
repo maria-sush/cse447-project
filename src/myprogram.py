@@ -3,12 +3,18 @@ import os
 import string
 import random
 from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
+from collections import defaultdict, Counter
 
 
 class MyModel:
     """
     This is a starter model to get you started. Feel free to modify this file.
     """
+
+    def __init__(self): 
+        self.bigrams = defaultdict(Counter) #for filling in the bigrams
+        self.trigrams = defaultdict(Counter) #for filling in the trigrams
+
 
     @classmethod
     def load_training_data(cls):
@@ -34,7 +40,19 @@ class MyModel:
 
     def run_train(self, data, work_dir):
         # your code here
-        pass
+        for text in data: #going through text example (data pending)
+            for i in range(len(text) - 1): #looping for bigrams
+                current = text[i] #1st char
+                next_char = text[i+1] #2nd char
+                self.bigrams[current][next_char] += 1 #storing this sequence
+            for i in range(len(text)-2):
+                current = text[i:i+2] #last 2 chars
+                next_char = text[i+2] #next char
+                self.trigrams[current][next_char] += 1 #storing in trigrams
+
+        print(self.bigrams)
+        print(self.trigrams)
+       #pass
 
     def run_pred(self, data):
         # your code here
@@ -42,8 +60,44 @@ class MyModel:
         all_chars = string.ascii_letters
         for inp in data:
             # this model just predicts a random character each time
-            top_guesses = [random.choice(all_chars) for _ in range(3)]
-            preds.append(''.join(top_guesses))
+            if len(inp) >= 2: #if we have at least 2 characters 
+                last_two_chars = inp[-2:] 
+                if last_two_chars in self.trigrams:
+                    counts = self.trigrams[last_two_chars] #counter for this 
+                    top_3_char = counts.most_common(3)
+                    top_guesses = []
+                    for char, count in top_3_char:
+                        top_guesses.append(char)
+                else:
+                    top_guesses = None #don't have any trigrams 
+            else:
+                top_guesses = None #too short 
+
+            if top_guesses is None and len(inp) >= 1: #need at least 1 char (bigram method)
+                last_char = inp[-1] 
+                if last_char in self.bigrams:
+                    counts = self.bigrams[last_char] #counter 
+                    top_3_char = counts.most_common(3)
+                    top_guesses = []
+                    for char, count in top_3_char:
+                        top_guesses.append(char)
+                else:
+                    top_guesses = None #don't have any trigrams 
+
+            if top_guesses is None: #none of the previous ones worked
+                if len(inp) == 0: 
+                    top_guesses = ['T', 'I', 'A'] #starting chars most common
+                elif inp[-1] == ' ':
+                    top_guesses = ['t', 'i', 'a'] #words after first one (not capital)
+                elif inp[-1] in '.,;:': #punctuation
+                    top_guesses = [' ', 'T', 'I']
+                else:
+                    top_guesses = [' ', 'e', 't'] #spacing or e/t
+
+            #top_guesses = [random.choice(all_chars) for _ in range(3)]
+            while len(top_guesses) < 3: #at least 3 chars
+                top_guesses.append(' ')
+            preds.append(''.join(top_guesses[:3]))
         return preds
 
     def save(self, work_dir):
