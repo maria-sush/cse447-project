@@ -18,8 +18,30 @@ class MyModel:
 
     @classmethod
     def load_training_data(cls):
+        data = [] 
+        import urllib.request 
+
+        urls = [
+            "https://www.gutenberg.org/files/1342/1342-0.txt",  # Pride & Prejudice
+            "https://www.gutenberg.org/files/11/11-0.txt",      # Alice in Wonderland
+            "https://www.gutenberg.org/files/84/84-0.txt",      # Frankenstein
+        ]
+
+        for url in urls: 
+            try: 
+                response = urllib.request.urlopen(url)
+                text = response.read().decode('utf-8')
+                data.append(text)
+                print(f"Downloaded {len(text)} charecters")
+            except Exception as e: 
+                print(f"Failed to download {url}: {e}")
+        if len(data) == 0: 
+            data = ["TEST DATA! Hello World!"]
+        return data 
+    
         # your code here
         # this particular model doesn't train
+
         return []
 
     @classmethod
