@@ -2,24 +2,29 @@
 import os
 import string
 import random
+import pickle
 from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
 from collections import defaultdict, Counter
 
 
 class MyModel:
     """
-    This is a starter model to get you started. Feel free to modify this file.
+    Checkpoint 3: Hybrid model — n-gram with GPT-2 boost on low-confidence cases.
+    N-gram is fast and handles common patterns; GPT-2 handles ambiguous cases.
     """
 
-    def __init__(self): 
-        self.bigrams = defaultdict(Counter) #for filling in the bigrams
-        self.trigrams = defaultdict(Counter) #for filling in the trigrams
+    CONFIDENCE_THRESHOLD = 0.50
 
+    def __init__(self):
+        self.bigrams = defaultdict(Counter)
+        self.trigrams = defaultdict(Counter)
+        self.gpt2_model = None    
+        self.gpt2_tokenizer = None  
 
     @classmethod
     def load_training_data(cls):
-        data = [] 
-        import urllib.request 
+        data = []
+        import urllib.request
 
         urls = [
             "https://www.gutenberg.org/files/1342/1342-0.txt",  # Pride & Prejudice
@@ -27,30 +32,25 @@ class MyModel:
             "https://www.gutenberg.org/files/84/84-0.txt",      # Frankenstein
         ]
 
-        for url in urls: 
-            try: 
+        for url in urls:
+            try:
                 response = urllib.request.urlopen(url)
                 text = response.read().decode('utf-8')
                 data.append(text)
-                print(f"Downloaded {len(text)} charecters")
-            except Exception as e: 
+                print(f"Downloaded {len(text)} characters from {url}")
+            except Exception as e:
                 print(f"Failed to download {url}: {e}")
-        if len(data) == 0: 
-            data = ["TEST DATA! Hello World!"]
-        return data 
-    
-        # your code here
-        # this particular model doesn't train
 
-        return []
+        if len(data) == 0:
+            data = ["Hello World! This is test data."]
+        return data
 
     @classmethod
     def load_test_data(cls, fname):
-        # your code here
         data = []
         with open(fname) as f:
             for line in f:
-                inp = line[:-1]  # the last character is a newline
+                inp = line[:-1]  
                 data.append(inp)
         return data
 
@@ -60,81 +60,160 @@ class MyModel:
             for p in preds:
                 f.write('{}\n'.format(p))
 
-    def run_train(self, data, work_dir):
-        # your code here
-        for text in data: #going through text example (data pending)
-            for i in range(len(text) - 1): #looping for bigrams
-                current = text[i] #1st char
-                next_char = text[i+1] #2nd char
-                self.bigrams[current][next_char] += 1 #storing this sequence
-            for i in range(len(text)-2):
-                current = text[i:i+2] #last 2 chars
-                next_char = text[i+2] #next char
-                self.trigrams[current][next_char] += 1 #storing in trigrams
 
-        print(self.bigrams)
-        print(self.trigrams)
-       #pass
+    def run_train(self, data, work_dir):
+        for text in data:
+            for i in range(len(text) - 1):
+                self.bigrams[text[i]][text[i + 1]] += 1
+            for i in range(len(text) - 2):
+                self.trigrams[text[i:i + 2]][text[i + 2]] += 1
+
+        print(f"Bigram keys: {len(self.bigrams)}, Trigram keys: {len(self.trigrams)}")
+
+        print("Downloading GPT-2 small weights (this may take a minute)...")
+        try:
+            from transformers import GPT2LMHeadModel, GPT2Tokenizer
+            gpt2_dir = os.path.join(work_dir, 'gpt2')
+            os.makedirs(gpt2_dir, exist_ok=True)
+            tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
+            model = GPT2LMHeadModel.from_pretrained('gpt2')
+            tokenizer.save_pretrained(gpt2_dir)
+            model.save_pretrained(gpt2_dir)
+            print(f"GPT-2 saved to {gpt2_dir}")
+        except Exception as e:
+            print(f"Warning: could not download GPT-2: {e}")
+            print("Will fall back to n-gram only at test time.")
+
+    def _load_gpt2(self, work_dir):
+        if self.gpt2_model is not None:
+            return True
+        gpt2_dir = os.path.join(work_dir, 'gpt2')
+        if not os.path.isdir(gpt2_dir):
+            return False
+        try:
+            from transformers import GPT2LMHeadModel, GPT2Tokenizer
+            import torch
+            print("Loading GPT-2 from disk...")
+            self.gpt2_tokenizer = GPT2Tokenizer.from_pretrained(gpt2_dir)
+            self.gpt2_model = GPT2LMHeadModel.from_pretrained(gpt2_dir)
+            self.gpt2_model.eval()
+            print("GPT-2 loaded.")
+            return True
+        except Exception as e:
+            print(f"Warning: could not load GPT-2: {e}")
+            return False
+
+    def _gpt2_predict(self, text, top_k=3):
+        import torch
+        inputs = self.gpt2_tokenizer(
+            text[-500:],
+            return_tensors='pt',
+            truncation=True,
+            max_length=512
+        )
+        with torch.no_grad():
+            outputs = self.gpt2_model(**inputs)
+        logits = outputs.logits[0, -1, :]
+        top_indices = torch.topk(logits, 200).indices
+        seen_chars = []
+        for tok_id in top_indices:
+            decoded = self.gpt2_tokenizer.decode(tok_id)
+            if not decoded:
+                continue
+            first_char = decoded[0].lower()
+            if first_char not in seen_chars:
+                seen_chars.append(first_char)
+            if len(seen_chars) == top_k:
+                break
+        return seen_chars if len(seen_chars) == top_k else None
+
+    def _ngram_predict_with_confidence(self, inp, top_k=3):
+        """
+        Returns (top_guesses, confidence) where confidence is in [0, 1].
+        Returns (None, 0.0) if no n-gram match found.
+        """
+        counter = None
+
+        if len(inp) >= 2:
+            last_two = inp[-2:]
+            if last_two in self.trigrams:
+                counter = self.trigrams[last_two]
+
+        if counter is None and len(inp) >= 1:
+            last_one = inp[-1]
+            if last_one in self.bigrams:
+                counter = self.bigrams[last_one]
+
+        if counter is None:
+            return None, 0.0
+
+        total = sum(counter.values())
+        top_items = counter.most_common(top_k)
+        top_guesses = [c for c, _ in top_items]
+        top_count = top_items[0][1] if top_items else 0
+        confidence = top_count / total if total > 0 else 0.0
+
+        return top_guesses, confidence
+
+    def _heuristic_predict(self, inp):
+        if len(inp) == 0:
+            return ['T', 'I', 'A']
+        elif inp[-1] == ' ':
+            return ['t', 'i', 'a']
+        elif inp[-1] in '.,;:!?':
+            return [' ', 'T', 'I']
+        else:
+            return [' ', 'e', 't']
 
     def run_pred(self, data):
-        # your code here
         preds = []
-        all_chars = string.ascii_letters
+        gpt2_available = self.gpt2_model is not None
+        gpt2_calls = 0 
+
         for inp in data:
-            # this model just predicts a random character each time
-            if len(inp) >= 2: #if we have at least 2 characters 
-                last_two_chars = inp[-2:] 
-                if last_two_chars in self.trigrams:
-                    counts = self.trigrams[last_two_chars] #counter for this 
-                    top_3_char = counts.most_common(3)
-                    top_guesses = []
-                    for char, count in top_3_char:
-                        top_guesses.append(char)
-                else:
-                    top_guesses = None #don't have any trigrams 
-            else:
-                top_guesses = None #too short 
+            top_guesses = None
+            ngram_guesses, confidence = self._ngram_predict_with_confidence(inp, top_k=3)
+            if ngram_guesses is not None and confidence >= self.CONFIDENCE_THRESHOLD:
+                top_guesses = ngram_guesses
+            elif gpt2_available:
+                try:
+                    top_guesses = self._gpt2_predict(inp, top_k=3)
+                    gpt2_calls += 1
+                except Exception as e:
+                    print(f"GPT-2 prediction failed: {e}")
+                    top_guesses = ngram_guesses 
 
-            if top_guesses is None and len(inp) >= 1: #need at least 1 char (bigram method)
-                last_char = inp[-1] 
-                if last_char in self.bigrams:
-                    counts = self.bigrams[last_char] #counter 
-                    top_3_char = counts.most_common(3)
-                    top_guesses = []
-                    for char, count in top_3_char:
-                        top_guesses.append(char)
-                else:
-                    top_guesses = None #don't have any trigrams 
+            elif ngram_guesses is not None:
+                top_guesses = ngram_guesses
+            if top_guesses is None:
+                top_guesses = self._heuristic_predict(inp)
 
-            if top_guesses is None: #none of the previous ones worked
-                if len(inp) == 0: 
-                    top_guesses = ['T', 'I', 'A'] #starting chars most common
-                elif inp[-1] == ' ':
-                    top_guesses = ['t', 'i', 'a'] #words after first one (not capital)
-                elif inp[-1] in '.,;:': #punctuation
-                    top_guesses = [' ', 'T', 'I']
-                else:
-                    top_guesses = [' ', 'e', 't'] #spacing or e/t
-
-            #top_guesses = [random.choice(all_chars) for _ in range(3)]
-            while len(top_guesses) < 3: #at least 3 chars
+            while len(top_guesses) < 3:
                 top_guesses.append(' ')
             preds.append(''.join(top_guesses[:3]))
+
+        print(f"GPT-2 was called for {gpt2_calls}/{len(data)} inputs ({100*gpt2_calls//max(len(data),1)}%)")
         return preds
 
     def save(self, work_dir):
-        # your code here
-        # this particular model has nothing to save, but for demonstration purposes we will save a blank file
-        with open(os.path.join(work_dir, 'model.checkpoint'), 'wt') as f:
-            f.write('dummy save')
+        checkpoint = {
+            'bigrams': dict(self.bigrams),
+            'trigrams': dict(self.trigrams),
+        }
+        with open(os.path.join(work_dir, 'model.checkpoint'), 'wb') as f:
+            pickle.dump(checkpoint, f)
+        print("N-gram checkpoint saved.")
 
     @classmethod
     def load(cls, work_dir):
-        # your code here
-        # this particular model has nothing to load, but for demonstration purposes we will load a blank file
-        with open(os.path.join(work_dir, 'model.checkpoint')) as f:
-            dummy_save = f.read()
-        return MyModel()
+        model = cls()
+        checkpoint_path = os.path.join(work_dir, 'model.checkpoint')
+        with open(checkpoint_path, 'rb') as f:
+            checkpoint = pickle.load(f)
+        model.bigrams = defaultdict(Counter, {k: Counter(v) for k, v in checkpoint['bigrams'].items()})
+        model.trigrams = defaultdict(Counter, {k: Counter(v) for k, v in checkpoint['trigrams'].items()})
+        model._load_gpt2(work_dir)
+        return model
 
 
 if __name__ == '__main__':
@@ -151,7 +230,7 @@ if __name__ == '__main__':
         if not os.path.isdir(args.work_dir):
             print('Making working directory {}'.format(args.work_dir))
             os.makedirs(args.work_dir)
-        print('Instatiating model')
+        print('Instantiating model')
         model = MyModel()
         print('Loading training data')
         train_data = MyModel.load_training_data()
@@ -159,6 +238,7 @@ if __name__ == '__main__':
         model.run_train(train_data, args.work_dir)
         print('Saving model')
         model.save(args.work_dir)
+
     elif args.mode == 'test':
         print('Loading model')
         model = MyModel.load(args.work_dir)
@@ -169,5 +249,7 @@ if __name__ == '__main__':
         print('Writing predictions to {}'.format(args.test_output))
         assert len(pred) == len(test_data), 'Expected {} predictions but got {}'.format(len(test_data), len(pred))
         model.write_pred(pred, args.test_output)
+
     else:
         raise NotImplementedError('Unknown mode {}'.format(args.mode))
+
