@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 import os
 import string
 import random
@@ -10,13 +9,14 @@ from collections import defaultdict, Counter
 
 class MyModel:
 
-    CONFIDENCE_THRESHOLD = 0.50
-
     def __init__(self):
+        self.unigrams = Counter()    
         self.bigrams = defaultdict(Counter) #creating the empty dictonaries
         self.trigrams = defaultdict(Counter)
-        self.gpt2_model = None    
-        self.gpt2_tokenizer = None  #this is for laoding later 
+        self.fourgrams = defaultdict(Counter)
+        self.fivegrams = defaultdict(Counter)
+        self.precomputed = {} #the top 3 predictions for every key 
+        self.lambdas = [0.05, 0.10, 0.15, 0.30, 0.40] #interpolation weight values 
 
     @classmethod
     def load_training_data(cls):
@@ -26,6 +26,11 @@ class MyModel:
             "https://www.gutenberg.org/files/1342/1342-0.txt",  # Pride & Prejudice
             "https://www.gutenberg.org/files/11/11-0.txt",      # Alice in Wonderland
             "https://www.gutenberg.org/files/84/84-0.txt",      # Frankenstein
+            "https://www.gutenberg.org/files/98/98-0.txt",      # A Tale of Two Cities 
+            "https://www.gutenberg.org/files/135/135-0.txt",    # Les Miserables (french)
+            "https://www.gutenberg.org/files/2000/2000-0.txt",  # Don Quijote (spanish)
+            "https://www.gutenberg.org/files/2229/2229-0.txt",  # Faust (german)
+            "https://www.gutenberg.org/files/1012/1012-0.txt",  # Divina Commedia (italian)
         ]
 
         for url in urls:
@@ -35,10 +40,9 @@ class MyModel:
                 data.append(text)
                 print(f"Downloaded {len(text)} from {url}")
             except Exception as e:
-                print(f"Could not download {url}: {e}") #just skipping if it doesn't work
-
+                print(f"Skipping {url}: {e}")  #skipping it if it fails
         if len(data) == 0:
-            data = ["Test data"] #in case it doesn't work 
+            data = ["Test data"] #fallback strategy if everything fails 
         return data
 
     @classmethod
@@ -54,147 +58,142 @@ class MyModel:
     def write_pred(cls, preds, fname):
         with open(fname, 'wt') as f:
             for p in preds: 
-                f.write(p + '\n') #adding the predicions back in and the new line charecter
+                f.write(p + '\n') #writing in the predictions along with the newline character
 
     def run_train(self, data, work_dir):
         for text in data:
+            text = text.lower() #normalizing to lowercase before counting  
+            for i in range(len(text)):
+                self.unigrams[text[i]] += 1 #single character
             for i in range(len(text) - 1):
-                self.bigrams[text[i]][text[i + 1]] += 1 #count what character follows the last 1 character
+                self.bigrams[text[i]][text[i + 1]] += 1 #1 char character (following char)
             for i in range(len(text) - 2):
-                self.trigrams[text[i:i + 2]][text[i + 2]] += 1 #count what character follows the last 2
+                self.trigrams[text[i : i + 2]][text[i + 2]] += 1 #2 char character 
+            for i in range(len(text) - 3):
+                self.fourgrams[text[i : i + 3]][text[i + 3]] += 1 #3 char character 
+            for i in range(len(text) - 4):
+                self.fivegrams[text[i : i + 4]][text[i + 4]] += 1 #4 char character 
+            
+        print(f"Unigrams: {len(self.unigrams)}, Bigrams: {len(self.bigrams)}, Trigrams: {len(self.trigrams)}, Fourgrams: {len(self.fourgrams)}, Fivegrams: {len(self.fivegrams)}")
+        print("Precomputing the predictions!") #the top 3 predictons for every key at every level 
+        self._precompute_predictions()
+        print(f"Precomputed {len(self.precomputed)} keys")
 
-        print(f"Bigram keys: {len(self.bigrams)}, Trigram keys: {len(self.trigrams)}")
+    def _precompute_predictions(self):
+        all_keys = set() #collecting all the key we have seen across the n gram levels 
+        all_keys.update(self.bigrams.keys()) #1 char keys
+        all_keys.update(self.trigrams.keys()) #2 char keys
+        all_keys.update(self.fourgrams.keys()) #3 char keys
+        all_keys.update(self.fivegrams.keys()) #4 char keys (most confidence in this one )
 
-        print("Downloading GPT-2")
-        try:
-            from transformers import GPT2LMHeadModel, GPT2Tokenizer
-            gpt2_dir = os.path.join(work_dir, 'gpt2') 
-            os.makedirs(gpt2_dir, exist_ok=True) #making a a folder to save gpt-2 into 
-            tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
-            model = GPT2LMHeadModel.from_pretrained('gpt2')
-            tokenizer.save_pretrained(gpt2_dir)
-            model.save_pretrained(gpt2_dir)
-            print(f"GPT-2 saved to {gpt2_dir}")#save to disk so we only download once
-        except Exception as e:
-            print(f"Could not download GPT-2: {e}")
-            print("Fall back to n-grams")
+        all_chars = list(self.unigrams.keys()) #collecting all the characters we have seen 
+        total_unigrams = sum(self.unigrams.values())
 
-    def _load_gpt2(self, work_dir):
-        if self.gpt2_model is not None:
-            return True #already in memory 
-        gpt2_dir = os.path.join(work_dir, 'gpt2')
-        if not os.path.isdir(gpt2_dir):
-            return False #gpt2 was never downloaded
-        try:
-            from transformers import GPT2LMHeadModel, GPT2Tokenizer
-            import torch
-            self.gpt2_tokenizer = GPT2Tokenizer.from_pretrained(gpt2_dir) #converting the text to numbers 
-            self.gpt2_model = GPT2LMHeadModel.from_pretrained(gpt2_dir)
-            self.gpt2_model.eval() #setting it to the eval mode 
-            print("GPT-2 loaded.") 
-            return True
-        except Exception as e:
-            print(f"Could not load GPT-2: {e}")
-            return False
+        for key in all_keys:
+            scores = Counter()
+            for char in all_chars:
+                score = 0.0
+                if total_unigrams > 0:
+                    score += self.lambdas[0] * (self.unigrams[char] / total_unigrams)  # how common is the char
+                else:
+                    score += 0.0
 
-    def _gpt2_predict(self, text, top_k=3):
-        import torch
-        inputs = self.gpt2_tokenizer(
-            text[-500:], #only using the last 500 characters 
-            return_tensors='pt',
-            truncation=True, #cutting it off if it still too long 
-            max_length=512 
-        )
-        with torch.no_grad():
-            outputs = self.gpt2_model(**inputs) #turning off the gradient tracking (only predicting)
-        logits = outputs.logits[0, -1, :] #getting a logit for possible next tokens
-        top_indices = torch.topk(logits, 200).indices #getting the top 200 characters for 3 unique characters
-        seen_chars = []
-        for tok_id in top_indices:
-            decoded = self.gpt2_tokenizer.decode(tok_id)
-            if not decoded:
-                continue #skipping the empty tokens 
-            first_char = decoded[0].lower()
-            if first_char not in seen_chars:
-                seen_chars.append(first_char)
-            if len(seen_chars) == top_k: #stop once have found the 3 unique first characters 
-                break
-        if len(seen_chars) == top_k:
-            return seen_chars
-        else:
-            return None
+                bigram_key = key[-1:] #taking the last character and finding what we have seen before
+                if bigram_key in self.bigrams:
+                    total = sum(self.bigrams[bigram_key].values())
+                    if total > 0:
+                        score += self.lambdas[1] * (self.bigrams[bigram_key][char] / total)
+                    else:
+                        score += 0.0
+                else:
+                    score += 0.0
 
-    def _ngram_predict_with_confidence(self, inp, top_k=3):
-        counter = None
+                trigram_key = key[-2:] #what is follow the last two chars
+                if trigram_key in self.trigrams:
+                    total = sum(self.trigrams[trigram_key].values())
+                    if total > 0:
+                        score += self.lambdas[2] * (self.trigrams[trigram_key][char] / total)
+                    else:
+                        score += 0.0
+                else:
+                    score += 0.0
 
-        if len(inp) >= 2: #trying the rigrams approach first 
-            last_two = inp[-2:]
-            if last_two in self.trigrams:
-                counter = self.trigrams[last_two] #what characters are usualy following this 
+                fourgram_key = key[-3:] #following the last 3 characters
+                if fourgram_key in self.fourgrams:
+                    total = sum(self.fourgrams[fourgram_key].values())
+                    if total > 0:
+                        score += self.lambdas[3] * (self.fourgrams[fourgram_key][char] / total)
+                    else:
+                        score += 0.0
+                else:
+                    score += 0.0
 
-        if counter is None and len(inp) >= 1: #using bigram 
-            last_one = inp[-1]
-            if last_one in self.bigrams:
-                counter = self.bigrams[last_one]
+                fivegram_key = key[-4:] #what is following the last 4 characters 
+                if fivegram_key in self.fivegrams:
+                    total = sum(self.fivegrams[fivegram_key].values())
+                    if total > 0:
+                        score += self.lambdas[4] * (self.fivegrams[fivegram_key][char] / total)
+                    else:
+                        score += 0.0
+                else:
+                    score += 0.0
 
-        if counter is None:
-            return None, 0.0
+                scores[char] = score
 
-        total = sum(counter.values()) #the amount of times this pattern was seen 
-        top_items = counter.most_common(top_k)
-        top_guesses = [c for c, _ in top_items] #getting the characters
-        top_count = top_items[0][1] #how many times we saw the top char
-        confidence = top_count / total if total > 0 else 0.0 #fraction of the time it was top 
-
-        return top_guesses, confidence
-
-    def _heuristic_predict(self, inp): #simple prediction approach
-        if len(inp) == 0:
-            return ['T', 'I', 'A']
-        elif inp[-1] == ' ':
-            return ['t', 'i', 'a']
-        elif inp[-1] in '.,;:!?':
-            return [' ', 'T', 'I']
-        else:
-            return [' ', 'e', 't']
+            top_3 = scores.most_common(3)
+            result = []
+            for char, score in top_3: 
+                result.append(char) #adding the character
+                    
+            self.precomputed[key] = result
 
     def run_pred(self, data):
         preds = []
-        gpt2_available = self.gpt2_model is not None #if the gpt2 model has been loaded
-        gpt2_calls = 0 
+        top_3_unigrams = self.unigrams.most_common(3) #getting the 3 most common characters from trainig data
+        fallback = []
 
-        for inp in data:
-            top_guesses = None
-            ngram_guesses, confidence = self._ngram_predict_with_confidence(inp, top_k=3) #getting the n-gram prediction and confidence score 
-            if ngram_guesses is not None and confidence >= self.CONFIDENCE_THRESHOLD: #if we are meetin the threhold
-                top_guesses = ngram_guesses
-            elif gpt2_available:
-                try:
-                    top_guesses = self._gpt2_predict(inp, top_k=3) #using gpt2 for the prediction
-                    gpt2_calls += 1
-                except Exception as e:
-                    print(f"GPT-2 prediction failed: {e}")
-                    top_guesses = ngram_guesses #crashed then go back to ngram
+        for char, _ in top_3_unigrams: #ignoring the count
+            fallback.append(char)
+        
+        for inp in data: 
+            try: 
+                top_guesses = None
 
-            elif ngram_guesses is not None:
-                top_guesses = ngram_guesses
-            if top_guesses is None:
-                top_guesses = self._heuristic_predict(inp) #the simple approach (basic rules)
+                if len(inp) >= 4 and inp[-4:].lower() in self.precomputed: #using the fivegram key approach
+                    top_guesses = self.precomputed[inp[-4:].lower()]
+                elif len(inp) >= 3 and inp[-3:].lower() in self.precomputed:
+                    top_guesses = self.precomputed[inp[-3:].lower()]  #fourgram keys
+                elif len(inp) >= 2 and inp[-2:].lower() in self.precomputed:
+                    top_guesses = self.precomputed[inp[-2:].lower()]  #trigram keys
+                elif len(inp) >= 1 and inp[-1:].lower() in self.precomputed:
+                    top_guesses = self.precomputed[inp[-1:].lower()]  #bigram keys
+                
+                if top_guesses is None: 
+                    top_guesses = fallback #using the character that was most popular 
 
-            while len(top_guesses) < 3:
-                top_guesses.append(' ')
-            preds.append(''.join(top_guesses[:3]))
+                top_guesses = list(dict.fromkeys(top_guesses))
+                while len(top_guesses) < 3: 
+                    top_guesses.append(' ')
+                preds.append(''.join(top_guesses[:3]))
+            
+            except Exception as e: 
+                print(f"Prediction failed for input: {e}")
+                preds.append(''.join(fallback[:3]))  #  fallback
 
         return preds
 
     def save(self, work_dir):
         checkpoint = {
-            'bigrams': dict(self.bigrams),
-            'trigrams': dict(self.trigrams), #saving the ngram values 
+            'unigrams': dict(self.unigrams), 
+            'bigrams': dict(self.bigrams), #1 character context and so on 
+            'trigrams': dict(self.trigrams),  
+            'fourgrams': dict(self.fourgrams),        
+            'fivegrams': dict(self.fivegrams),        
+            'precomputed': self.precomputed,
         }
         with open(os.path.join(work_dir, 'model.checkpoint'), 'wb') as f:
             pickle.dump(checkpoint, f)
-        print("N-gram checkpoint saved.")
+        print("Checkpoint saved")
 
     @classmethod
     def load(cls, work_dir):
@@ -202,9 +201,12 @@ class MyModel:
         checkpoint_path = os.path.join(work_dir, 'model.checkpoint')
         with open(checkpoint_path, 'rb') as f:
             checkpoint = pickle.load(f)
+        model.unigrams = Counter(checkpoint['unigrams'])
         model.bigrams = defaultdict(Counter, {k: Counter(v) for k, v in checkpoint['bigrams'].items()})
         model.trigrams = defaultdict(Counter, {k: Counter(v) for k, v in checkpoint['trigrams'].items()})
-        model._load_gpt2(work_dir) #loading the gpt2 from the disk 
+        model.fourgrams = defaultdict(Counter, {k: Counter(v) for k, v in checkpoint['fourgrams'].items()})
+        model.fivegrams = defaultdict(Counter, {k: Counter(v) for k, v in checkpoint['fivegrams'].items()})
+        model.precomputed = checkpoint['precomputed']
         return model
 
 
