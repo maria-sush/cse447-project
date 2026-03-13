@@ -31,6 +31,10 @@ class MyModel:
             "https://www.gutenberg.org/files/2000/2000-0.txt",  # Don Quijote (spanish)
             "https://www.gutenberg.org/files/2229/2229-0.txt",  # Faust (german)
             "https://www.gutenberg.org/files/1012/1012-0.txt",  # Divina Commedia (italian)
+            "https://www.gutenberg.org/files/2413/2413-0.txt",  # Don Quijote Part 2 (spanish)
+            "https://www.gutenberg.org/files/4650/4650-0.txt",  # Confessions (portuguese)
+            "https://www.gutenberg.org/files/2600/2600-0.txt",  # War and Peace (russian)
+            "https://www.gutenberg.org/files/1400/1400-0.txt",  # Great Expectations (english)
         ]
 
         for url in urls:
